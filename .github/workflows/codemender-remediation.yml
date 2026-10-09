@@ -67,6 +67,9 @@ jobs:
             echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp/credentials.json" >> "$GITHUB_ENV"
             echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$RUNNER_TEMP/gcp/credentials.json" >> "$GITHUB_ENV"
           fi
+          if [ -n "$CLOUDSDK_CORE_PROJECT" ]; then
+            echo "GOOGLE_CLOUD_PROJECT=$CLOUDSDK_CORE_PROJECT" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up Google Cloud SDK & CodeMender CLI
         uses: google-github-actions/setup-gcloud@v2
