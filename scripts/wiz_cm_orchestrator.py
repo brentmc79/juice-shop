@@ -374,8 +374,20 @@ class CodeMenderRunner:
             raise RuntimeError(f"Command '{' '.join(cmd)}' failed with exit code {res.returncode}")
         return res
 
+    def init(self) -> None:
+        """Ensures CodeMender workspace is initialized via `cm init`."""
+        cmd = [self.binary, "init"]
+        logger.info("Initializing CodeMender workspace via 'cm init'...")
+        self._run_cmd(cmd, check=True)
+
     def import_finding(self, findings_file_path: str) -> str:
         """Runs `cm report import --file <path>` and extracts the registered finding ID."""
+        # Proactively ensure workspace is initialized
+        try:
+            self.init()
+        except Exception as e:
+            logger.warning(f"cm init warning: {e}")
+
         cmd = [self.binary, "report", "import", "--file", findings_file_path]
         res = self._run_cmd(cmd)
 
@@ -403,8 +415,15 @@ class CodeMenderRunner:
         return "1"
 
     def fix(self, finding_id: str) -> bool:
-        """Runs `cm fix <finding_id> -y` to perform automated code remediation."""
-        cmd = [self.binary, "fix", finding_id, "-y"]
+        """Runs `cm fix <finding_id>` with CI non-interactive flags."""
+        cmd = [
+            self.binary,
+            "fix",
+            finding_id,
+            "--sandbox=false",
+            "--yes",
+            "--bypass-warning",
+        ]
         res = self._run_cmd(cmd, check=False)
         return res.returncode == 0
 
