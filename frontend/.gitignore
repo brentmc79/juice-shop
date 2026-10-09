@@ -39,3 +39,13 @@ testem.log
 # System Files
 .DS_Store
 Thumbs.db
+
+# CodeMender enforced ignores
+node_modules
+node_modules/
+venv
+venv/
+.venv
+.venv/
+.exploit
+.exploit/
