@@ -77,14 +77,14 @@ jobs:
       - name: Install CodeMender CLI
         run: |
           echo "Downloading CodeMender CLI from Artifact Registry..."
-          curl -L -o cm-linux-amd64.zip "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+          curl -L --retry 5 --retry-connrefused --retry-delay 2 -o cm-linux-amd64.zip "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
 
           # Verify if the downloaded file is a valid zip (in case direct unauthenticated download returned an HTTP error response)
           if ! unzip -t cm-linux-amd64.zip >/dev/null 2>&1; then
             echo "Direct download did not return a valid zip archive; retrying with GCP access token..."
             TOKEN="${{ steps.gcp-auth.outputs.access_token }}"
             if [ -n "$TOKEN" ]; then
-              curl -L -H "Authorization: Bearer $TOKEN" -o cm-linux-amd64.zip "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+              curl -L --retry 5 --retry-connrefused --retry-delay 2 -H "Authorization: Bearer $TOKEN" -o cm-linux-amd64.zip "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
             fi
           fi
 
