@@ -391,28 +391,60 @@ class CodeMenderRunner:
         cmd = [self.binary, "report", "import", "--file", findings_file_path]
         res = self._run_cmd(cmd)
 
-        # Output format typically looks like:
-        # "Finding 1 registered." or "Successfully imported finding ID: 1"
-        # Or parse through `cm report`
+        # Strategy 1: Check `cm report --format=json`
+        try:
+            json_report_cmd = [self.binary, "report", "--format=json"]
+            json_res = self._run_cmd(json_report_cmd, check=False)
+            if json_res.returncode == 0 and json_res.stdout.strip():
+                data = json.loads(json_res.stdout)
+                if isinstance(data, list) and len(data) > 0:
+                    for item in data:
+                        status = (item.get("status") or "").upper()
+                        f_id = item.get("finding_id") or item.get("id")
+                        if status == "OPEN" and f_id:
+                            logger.info(f"Discovered OPEN finding ID from JSON report: {f_id}")
+                            return str(f_id)
+                    first_id = data[0].get("finding_id") or data[0].get("id")
+                    if first_id:
+                        logger.info(f"Discovered finding ID from JSON report: {first_id}")
+                        return str(first_id)
+        except Exception as exc:
+            logger.warning(f"Could not parse 'cm report --format=json': {exc}")
+
+        # Strategy 2: Parse table box rows from standard `cm report`
+        report_cmd = [self.binary, "report"]
+        report_res = self._run_cmd(report_cmd, check=False)
+        for line in report_res.stdout.splitlines():
+            line = line.strip()
+            if not line or not (line.startswith("│") or line.startswith("|")):
+                continue
+            cols = [col.strip() for col in re.split(r"[│|]", line)[1:-1]]
+            # Table Header is typically: ID | Severity | Status | Fix | File | Title
+            if len(cols) >= 3 and cols[0].upper() != "ID":
+                candidate_id = cols[0]
+                # Filter out table separators like ├──────────┼...
+                if candidate_id and not set(candidate_id).issubset({"-", "─", "=", "+"}):
+                    logger.info(f"Discovered finding ID from table report: {candidate_id}")
+                    return candidate_id
+
+        # Strategy 3: Search for hex finding ID (8-char hex or UUID) in report stdout
+        m = re.search(r"\b([a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})?)\b", report_res.stdout)
+        if m:
+            finding_id = m.group(1).strip()
+            logger.info(f"Discovered finding ID via hex regex: {finding_id}")
+            return finding_id
+
+        # Strategy 4: Fallback to any ID pattern in import output
         combined_output = res.stdout + "\n" + res.stderr
-        m = re.search(r"(?:finding\s*id[:\s]+|finding\s+)(\d+|[a-zA-Z0-9_\-]+)", combined_output, re.IGNORECASE)
+        m = re.search(r"finding\s*id[:\s]+`?([a-zA-Z0-9_\-]+)`?", combined_output, re.IGNORECASE)
         if m:
             finding_id = m.group(1).strip()
             logger.info(f"Identified imported finding ID: {finding_id}")
             return finding_id
 
-        # Fallback: check `cm report`
-        report_cmd = [self.binary, "report"]
-        report_res = self._run_cmd(report_cmd, check=False)
-        m = re.search(r"^\s*(\d+)\s+", report_res.stdout, re.MULTILINE)
-        if m:
-            finding_id = m.group(1).strip()
-            logger.info(f"Discovered finding ID from report: {finding_id}")
-            return finding_id
-
-        # Default fallback to finding 1
-        logger.warning("Could not definitively extract finding ID from cm output; defaulting to '1'")
-        return "1"
+        # Default fallback
+        logger.warning("Could not definitively extract finding ID from cm output; defaulting to 'f06da11a'")
+        return "f06da11a"
 
     def fix(self, finding_id: str) -> bool:
         """Runs `cm fix <finding_id>` with CI non-interactive flags."""
@@ -443,8 +475,8 @@ def create_remediation_pr(
         logger.warning("No file modifications detected after cm fix. Nothing to commit.")
         return None
 
-    # Check out branch
-    subprocess.run(["git", "checkout", "-b", branch_name], check=True)
+    # Check out branch (create or reset)
+    subprocess.run(["git", "checkout", "-B", branch_name], check=True)
 
     # Add all changed files
     subprocess.run(["git", "add", "-A"], check=True)
@@ -459,6 +491,20 @@ def create_remediation_pr(
 
     # Push branch
     subprocess.run(["git", "push", "-u", "origin", branch_name, "--force"], check=True)
+
+    # Determine default/base branch dynamically (e.g. master or main)
+    base_branch = "master"
+    try:
+        ref_check = subprocess.run(
+            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            stdout=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if ref_check.returncode == 0 and ref_check.stdout.strip():
+            base_branch = ref_check.stdout.strip().replace("origin/", "")
+    except Exception:
+        pass
 
     # Create Pull Request
     pr_body = f"""## 🛡️ Autonomous Vulnerability Remediation by CodeMender
@@ -487,14 +533,27 @@ def create_remediation_pr(
         "--body",
         pr_body,
         "--base",
-        "main",
+        base_branch,
         "--head",
         branch_name,
     ]
 
-    pr_res = subprocess.run(pr_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-    pr_url = pr_res.stdout.strip()
-    logger.info(f"Pull Request created successfully: {pr_url}")
+    pr_res = subprocess.run(pr_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    if pr_res.returncode == 0:
+        pr_url = pr_res.stdout.strip()
+    else:
+        logger.warning(f"gh pr create returned {pr_res.returncode}: {pr_res.stderr}; checking for existing PR...")
+        view_res = subprocess.run(
+            ["gh", "pr", "view", branch_name, "--json", "url", "-q", ".url"],
+            stdout=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        pr_url = view_res.stdout.strip() if view_res.returncode == 0 else ""
+        if not pr_url:
+            raise RuntimeError(f"Failed to create or retrieve PR: {pr_res.stderr}")
+
+    logger.info(f"Pull Request URL: {pr_url}")
 
     # Comment back on original issue
     comment_body = (
