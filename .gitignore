@@ -71,3 +71,8 @@ config/*.yml
 # Misc
 .playwright-mcp/
 cypress/screenshots/
+
+# CodeMender & CI Credentials
+gha-creds*.json
+codemender_finding.json
+.codemender/

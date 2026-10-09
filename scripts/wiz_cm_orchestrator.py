@@ -355,6 +355,17 @@ class CodeMenderRunner:
 
     def __init__(self, binary_path: str = "cm"):
         self.binary = binary_path
+        # Safeguard GCP credentials file from cm fix workspace reset (git clean -fd)
+        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if creds_path and os.path.isfile(creds_path) and not creds_path.startswith(tempfile.gettempdir()):
+            safe_creds_path = os.path.join(tempfile.gettempdir(), "gha-creds-safe.json")
+            try:
+                shutil.copyfile(creds_path, safe_creds_path)
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = safe_creds_path
+                os.environ["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = safe_creds_path
+                logger.info(f"Protected Google Cloud credentials at safe path: {safe_creds_path}")
+            except Exception as e:
+                logger.warning(f"Could not copy credentials to safe path: {e}")
 
     def _run_cmd(self, cmd: List[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         logger.info(f"Executing: {' '.join(cmd)}")
@@ -646,6 +657,13 @@ def main() -> int:
         json.dump(codemender_schema_list, f, indent=2)
     logger.info(f"Wrote CodeMender finding to {args.output_file}")
 
+    # Backup copy in temp directory to survive cm fix workspace reset (git clean -fd)
+    tmp_backup = os.path.join(tempfile.gettempdir(), os.path.basename(args.output_file))
+    try:
+        shutil.copyfile(args.output_file, tmp_backup)
+    except Exception:
+        pass
+
     if args.skip_execution:
         logger.info("Skipping CLI execution as requested.")
         return 0
@@ -656,6 +674,13 @@ def main() -> int:
     logger.info(f"Imported into CodeMender as ID: {cm_id}. Initiating fix...")
 
     fix_success = cm_runner.fix(cm_id)
+
+    # Restore output file if git clean removed it so upload-artifact finds it
+    if not os.path.exists(args.output_file) and os.path.exists(tmp_backup):
+        try:
+            shutil.copyfile(tmp_backup, args.output_file)
+        except Exception:
+            pass
     if not fix_success:
         logger.error(f"cm fix failed for finding ID {cm_id}")
         return 1
