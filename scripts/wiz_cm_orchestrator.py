@@ -185,9 +185,9 @@ class IssueBodyParser:
         if m:
             return m.group(1).strip()
 
-        # 2. Wiz console URL format: https://app.wiz.io/issues#issue-<ID> or /findings/<ID>
+        # 2. Wiz console URL format (including hash fragment encoding: issues#~(issue~'<ID>'))
         m = re.search(
-            r"https://app\.wiz\.io/(?:issues#issue-|findings/|issues/)([a-zA-Z0-9_\-]+)",
+            r"https://app\.wiz\.io/(?:issues#issue-|findings/|issues/|issues#~?\(?issue~'?)([a-zA-Z0-9_\-]+)",
             body,
             re.IGNORECASE,
         )
@@ -196,6 +196,11 @@ class IssueBodyParser:
 
         # 3. Plain text format: Finding ID: <ID> or Wiz Issue ID: <ID>
         m = re.search(r"(?:Finding|Wiz\s*Issue|Wiz)\s*ID[:\s]+`?([a-zA-Z0-9_\-]+)`?", body, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+
+        # 4. Check for SECURITY_TOOL_FINDING.ID in Wiz Evidence tables
+        m = re.search(r"\|\s*([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})\s*\|", body)
         if m:
             return m.group(1).strip()
 
@@ -217,26 +222,65 @@ class IssueBodyParser:
     @classmethod
     def parse_markdown_to_finding(cls, body: str) -> CodeMenderFinding:
         """Parse structured fields from an issue created by Wiz GitHub Automation."""
-        # Extract File Path
-        file_path = cls._get_field(r"File(?:\s*Path)?", body) or "src/main.py"
+        # Check if Wiz Evidence table (SECURITY_TOOL_FINDING) is present
+        table_lines = [l.strip() for l in body.splitlines() if l.strip().startswith("|")]
+        table_data = {}
+        if len(table_lines) >= 3 and "SECURITY_TOOL_FINDING" in table_lines[0]:
+            headers = [h.strip() for h in table_lines[0].split("|")[1:-1]]
+            values = [v.strip() for v in table_lines[2].split("|")[1:-1]]
+            if len(headers) == len(values):
+                table_data = dict(zip(headers, values))
 
-        # Extract Line Number
+        if table_data:
+            file_path = table_data.get("SECURITY_TOOL_FINDING.detailed_filePath", "package.json").lstrip("/")
+            raw_sev = table_data.get("SECURITY_TOOL_FINDING.severity", "HIGH").upper()
+            if "CRITICAL" in raw_sev:
+                severity = "CRITICAL"
+            elif "HIGH" in raw_sev:
+                severity = "HIGH"
+            elif "MEDIUM" in raw_sev:
+                severity = "MEDIUM"
+            elif "LOW" in raw_sev:
+                severity = "LOW"
+            else:
+                severity = "HIGH"
+
+            vuln_name = table_data.get("SECURITY_TOOL_FINDING.Name", "Vulnerability")
+            pkg_name = table_data.get("SECURITY_TOOL_FINDING.detailed_name", "")
+            title = f"{vuln_name} in {pkg_name}" if pkg_name else vuln_name
+            vuln_type = vuln_name
+
+            fix_ver = table_data.get("SECURITY_TOOL_FINDING.detailed_fixedVersion", "")
+            current_ver = table_data.get("SECURITY_TOOL_FINDING.detailed_version", "")
+            remediation = table_data.get("SECURITY_TOOL_FINDING.remediation", "")
+            msg_parts = [f"Vulnerability {vuln_name} detected in {pkg_name} ({current_ver})."]
+            if fix_ver:
+                msg_parts.append(f"Fixed version: {fix_ver}.")
+            if remediation:
+                msg_parts.append(f"Recommended remediation: {remediation}.")
+            message = " ".join(msg_parts)
+
+            return CodeMenderFinding(
+                file_path=file_path,
+                line=1,
+                title=title,
+                message=message,
+                severity=severity,
+                vuln_type=vuln_type,
+            )
+
+        # Fallback to standard key-value and markdown section parsing
+        file_path = cls._get_field(r"File(?:\s*Path)?", body) or "src/main.py"
         raw_line = cls._get_field(r"Line(?:\s*Number)?", body)
         line = int(raw_line) if raw_line and raw_line.isdigit() else 1
-
-        # Extract Severity
         severity = (cls._get_field(r"Severity", body) or "HIGH").upper()
-
-        # Extract Title / Vulnerability Name
         title = cls._get_field(r"(?:Title|Vulnerability|Rule)", body) or "Security Vulnerability"
 
-        # Extract CWE / Vuln Type
         vuln_type = cls._get_field(r"(?:CWE|Vuln\s*Type)", body)
         if not vuln_type:
             cwe_m = re.search(r"(CWE-\d+)", body, re.IGNORECASE)
             vuln_type = cwe_m.group(1).strip() if cwe_m else "CWE-Unknown"
 
-        # Extract Description / Green Agent Analysis
         message_parts = []
         desc_m = re.search(
             r"### Description\s*\n([\s\S]*?)(?=###|\Z)", body, re.IGNORECASE
@@ -253,7 +297,6 @@ class IssueBodyParser:
             )
 
         if not message_parts:
-            # Fallback to general body text
             message = "Remediate vulnerability identified by Wiz code scanner."
         else:
             message = "\n\n".join(message_parts)
